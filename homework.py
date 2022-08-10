@@ -1,6 +1,5 @@
 import logging
 import os
-import sys
 import time
 from http import HTTPStatus
 
@@ -8,17 +7,19 @@ import requests
 import telegram
 from dotenv import load_dotenv
 
+import settings
+
 load_dotenv()
 PRACTICUM_TOKEN = os.getenv("PRACTICUM_TOKEN")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-RETRY_TIME = 600
-ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
+TELEGRAM_RETRY_TIME = settings.RETRY_TIME
+ENDPOINT = settings.ENDPOINT
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
 
-HOMEWORK_STATUSES = {
+HOMEWORK_VERDICTS = {
     'approved': 'Работа проверена: ревьюеру всё понравилось. Ура!',
     'reviewing': 'Работа взята на проверку ревьюером.',
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
@@ -80,11 +81,11 @@ def parse_status(homework):
     """Извлекает статус работы."""
     homework_name = homework.get("homework_name")
     homework_status = homework.get("status")
-    verdict = HOMEWORK_STATUSES[homework_status]
+    verdict = HOMEWORK_VERDICTS[homework_status]
     if not verdict:
         message_verdict = "Такого статуса нет в словаре"
         raise KeyError(message_verdict)
-    if homework_status not in HOMEWORK_STATUSES:
+    if homework_status not in HOMEWORK_VERDICTS:
         message_homework_status = "Такого статуса не существует"
         raise KeyError(message_homework_status)
     if "homework_name" not in homework:
@@ -95,41 +96,38 @@ def parse_status(homework):
 
 def check_tokens():
     """Проверяет доступность переменных."""
-    tokens = all([TELEGRAM_TOKEN, PRACTICUM_TOKEN, TELEGRAM_CHAT_ID])
-    return tokens
+    tokens = [PRACTICUM_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_TOKEN]
+    for token in tokens:
+        if token is None:
+            logger.critical(f'Отсутствует переменная окружения: {token}')
+            return False
+    return True
 
 
 def main():
     """Основная логика работы бота."""
+    check_tokens()
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     current_timestamp = int(time.time())
-    if not check_tokens():
-        logger.critical('Ошибка в получении токенов!')
-        sys.exit()
-    current_report = {}
-    prev_report = {}
     while True:
         try:
             response = get_api_answer(current_timestamp)
-            homework = check_response(response)[0]
-            if homework:
-                message = parse_status(homework)
-                current_report[response.get("homework_name")] = \
-                    response.get("status")
-                if current_report != prev_report:
-                    send_message(bot, message)
-                    prev_report = current_report.copy()
-                    current_report[response.get("homework_name")] = \
-                        response.get("status")
-            current_timestamp = response.get("current_date")
-
+            homeworks = check_response(response)
+            if homeworks:
+                send_message(bot, parse_status(homeworks[0]))
+            else:
+                logger.debug('Статус не изменился')
+            current_timestamp = current_timestamp
         except Exception as error:
-            message = f"Сбой в работе программы: {error}"
-            logger.error(message)
-        else:
-            logger.error("Сбой, ошибка не найдена")
+            message = f'Сбой в работе программы: {error}'
+            logging.error(message)
+            try:
+                send_message(bot, message)
+            except Exception:
+                not_send_message = 'Не удалось отправить сообщение об ошибке'
+                logging.error(not_send_message)
         finally:
-            time.sleep(RETRY_TIME)
+            time.sleep(TELEGRAM_RETRY_TIME)
 
 
 if __name__ == "__main__":
